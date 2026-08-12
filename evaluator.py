@@ -92,7 +92,7 @@ def construct_c2(corr: Correction, r: int, s_x: bool, s_z: bool, kappa: int) -> 
             if get_bit(r, i):
                 circuit.z(z[i])
     if corr.x ^ s_z:
-        circuit.x(b[0][1:])
+        circuit.x(b[0])
     if corr.x:
         circuit.x(0)
     if s_x:

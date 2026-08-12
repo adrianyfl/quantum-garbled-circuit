@@ -62,8 +62,6 @@ def apply_coherent_correction(circuit, operation, input_witnesses, output_qubits
         circuit.cz(d_witness, out)
         circuit.cz(e_witness, out)
         circuit.cx(e_witness, out)
-        circuit.t(e_witness)
-        circuit.cz(d_witness, e_witness)
         return
 
     num_inputs = len(input_witnesses)
