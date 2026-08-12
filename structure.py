@@ -29,8 +29,6 @@ class TeleportationRecord:
     s_z: bool
     t_x: bool
     t_z: bool
-    d: bool
-    e: bool
 
 @dataclass
 class InjectionRecord:
@@ -42,8 +40,6 @@ class InjectionRecord:
     s_z: bool
     t_x: bool
     t_z: bool
-    d: bool
-    e: bool
 
 @dataclass
 class GateRecord:
@@ -63,6 +59,7 @@ class QGC:
     current_segment: dict[int, int] = field(default_factory=dict)
     teleportation: dict[int, list[TeleportationRecord]] = field(default_factory=dict)
     injection: dict[int, InjectionRecord] = field(default_factory=dict)
+    segment_record: dict[int, object] = field(default_factory=dict)
 
 class SegmentFactory:
     def __init__(self, kappa: int, start_physical_qubits: int = 0) -> None:

@@ -1,11 +1,11 @@
 from qiskit import AncillaRegister
 from qiskit.quantum_info import Statevector
 
-from correction import propagate_correction
+from correction import propagate_correction, get_witnesses, apply_coherent_correction
 from structure import *
 from helper import *
 from encoder import sample_a, construct_lambda1
-from decoder import construct_lambda2, construct_lambda3
+from evaluator import construct_lambda2, construct_lambda3
 
 # create EPR pair between q1 and q2
 def prep_epr_pair(circuit: QuantumCircuit, q1, q2):
@@ -23,7 +23,7 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
     injection_records: dict[int, InjectionRecord] = {}
     teleportation_records: dict[int, list[TeleportationRecord]] = {}
     converted_circuit = QuantumCircuit(circuit.num_qubits)
-    pauli_frame: dict[int, tuple[bool, bool]] = {}
+    segment_record: dict[int, object] = {}
 
     # initialize input segments
     for q in range(circuit.num_qubits):
@@ -56,7 +56,6 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
 
     # inject original input
     for q in range(circuit.num_qubits):
-        injection_records[q] = ...
         segment2 = segments[initial_segment[q]]
 
         # sample key
@@ -71,11 +70,9 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
             bool(random.getrandbits(1)),
             bool(random.getrandbits(1)),
             bool(random.getrandbits(1)),
-            bool(random.getrandbits(1)),
-            bool(random.getrandbits(1)),
         )
         injection_records[q] = record
-        pauli_frame[segment2.segment_id] = (record.d, record.e)
+        segment_record[segment2.segment_id] = record
 
         # mapping for compose
         mapping = [q, segment2.epr[0], *segment2.z]
@@ -102,9 +99,18 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
 
     # add gate + teleportation
     for g in gate_records:
-        converted_circuit.append(g.operation, [segments[s_id].epr[1] for s_id in g.input_segments])
-        input_frames = [pauli_frame[s_id] for s_id in g.input_segments]
-        corrections = propagate_correction(g.operation, input_frames)
+        input_segments = [segments[s_id] for s_id in g.input_segments]
+        converted_circuit.append(g.operation, [s.epr[1] for s in input_segments])
+
+        input_witnesses = [
+            get_witnesses(converted_circuit, s, segment_record[s.segment_id], kappa)
+            for s in input_segments
+        ]
+        apply_coherent_correction(
+            converted_circuit, g.operation, input_witnesses,
+            output_qubits=[s.epr[1] for s in input_segments],
+        )
+
         for i in range(len(g.input_segments)):
             segment1 = segments[g.input_segments[i]]
             segment2 = segments[g.output_segments[i]]
@@ -112,8 +118,6 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
             # sample key
             l_x = sample_label(kappa)
             l_z = sample_label(kappa)
-            d_out = bool(random.getrandbits(1))
-            e_out = bool(random.getrandbits(1))
             record = TeleportationRecord(
                 segment1.segment_id,
                 segment2.segment_id,
@@ -123,13 +127,11 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
                 bool(random.getrandbits(1)),
                 bool(random.getrandbits(1)),
                 bool(random.getrandbits(1)),
-                d_out,
-                e_out,
             )
             if g.gate_id not in teleportation_records:
                 teleportation_records[g.gate_id] = []
             teleportation_records[g.gate_id].append(record)
-            pauli_frame[segment2.segment_id] = (record.d, record.e)
+            segment_record[segment2.segment_id] = record
 
             # mapping for compose
             mapping = [segment1.epr[1], segment2.epr[0], *segment2.z]
@@ -147,14 +149,11 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
             a_inverse_circ = a_circ.inverse()
             converted_circuit.compose(a_inverse_circ, qubits=mapping, inplace=True)
             # construct lambda2 sub circuit
-            corr = corrections[i]
-            lambda2_circuit = construct_lambda2(corr, l_z, l_x, record.s_x, record.s_z, record.t_x, record.t_z, kappa)
+            lambda2_circuit = construct_lambda2(Correction(False, False, False), l_z, l_x, record.s_x, record.s_z, record.t_x, record.t_z, kappa)
             converted_circuit.compose(lambda2_circuit, qubits=mapping, inplace=True)
             # apply lambda3 sub circuit
             lambda3_circuit = construct_lambda3(kappa)
             converted_circuit.compose(lambda3_circuit, qubits=mapping, inplace=True)
-            # frame for next segment2 consumer
-            pauli_frame[segment2.segment_id] = (d_out, e_out)
 
     # final construction
     qgc = QGC(
@@ -164,6 +163,7 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int, input_prep: QuantumCircu
         gates=gate_records,
         current_segment=current_segment,
         teleportation=teleportation_records,
-        injection=injection_records
+        injection=injection_records,
+        segment_record=segment_record,
     )
     return qgc
