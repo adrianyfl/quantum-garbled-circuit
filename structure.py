@@ -29,6 +29,8 @@ class TeleportationRecord:
     s_z: bool
     t_x: bool
     t_z: bool
+    d: bool
+    e: bool
 
 @dataclass
 class InjectionRecord:
@@ -40,6 +42,8 @@ class InjectionRecord:
     s_z: bool
     t_x: bool
     t_z: bool
+    d: bool
+    e: bool
 
 @dataclass
 class GateRecord:
