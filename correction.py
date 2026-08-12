@@ -53,6 +53,19 @@ def linear_response(operation, num_inputs):
 
 # apply reconstructed correction from linear_response
 def apply_coherent_correction(circuit, operation, input_witnesses, output_qubits):
+    name = operation.name.lower()
+
+    if name == "t":
+        d_witness,e_witness = input_witnesses[0]
+        out = output_qubits[0]
+        circuit.cp(np.pi/2, e_witness, out)
+        circuit.cz(d_witness, out)
+        circuit.cz(e_witness, out)
+        circuit.cx(e_witness, out)
+        circuit.t(e_witness)
+        circuit.cz(d_witness, e_witness)
+        return
+
     num_inputs = len(input_witnesses)
     responses = linear_response(operation, num_inputs)
 
