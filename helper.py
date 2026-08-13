@@ -17,3 +17,7 @@ def find_witness_bit(l0: int, l1: int, kappa: int) -> int:
         if get_bit(l0, i) != get_bit(l1, i):
             return i
     raise ValueError("labels are identical -- sample_label should have prevented this")
+
+# calculate size of the gadget based on kappa
+def gadget_num_qubits(kappa: int) -> int:
+    return 3 + 4 * kappa + kappa * kappa
