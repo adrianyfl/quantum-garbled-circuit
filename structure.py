@@ -61,6 +61,17 @@ class QGC:
     injection: dict[int, InjectionRecord] = field(default_factory=dict)
     segment_record: dict[int, object] = field(default_factory=dict)
 
+@dataclass
+class WireParams:
+    A: QuantumCircuit
+    l_z: tuple
+    l_x: tuple
+    s_x: bool
+    s_z: bool
+    t_x: bool
+    t_z: bool
+    kappa:int
+
 class SegmentFactory:
     def __init__(self, kappa: int, start_physical_qubits: int = 0) -> None:
         self.next_segment_id = 0

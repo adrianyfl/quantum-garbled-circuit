@@ -41,6 +41,7 @@ def build(n):
     return index, elems
 
 # construct the pair + single structure based on kappa
+@lru_cache(maxsize=None)
 def slot_structure(kappa):
     pairs = []
     singles = list(range(gadget_num_qubits(kappa)))
@@ -87,6 +88,13 @@ def describe(circuit: QuantumCircuit, kappa: int) -> dict[tuple[int, tuple[int]]
         desc[s] = idx1[Clifford(local).tableau.tobytes()] if s[0] == 1 else idx2[Clifford(local).tableau.tobytes()]
     return desc
 
+# generate a description based on lambda2 and A inverse
+def describe_corr(A: QuantumCircuit, lambda2: QuantumCircuit, kappa: int) -> dict[tuple[int, tuple[int]], int]:
+    circuit = QuantumCircuit(A.num_qubits)
+    circuit.compose(A.inverse(), inplace=True)
+    circuit.compose(lambda2, inplace=True)
+    return describe(circuit, kappa)
+
 # rebuild the Clifford circuit based on a description
 def rebuild(desc: dict[tuple[int, tuple[int]], int], kappa: int) -> QuantumCircuit:
     _, e1 = build(1)
@@ -97,3 +105,16 @@ def rebuild(desc: dict[tuple[int, tuple[int]], int], kappa: int) -> QuantumCircu
         circuit.compose(elems[idx].to_circuit(), qubits=list(s[1]), inplace=True)
     return circuit
 
+# convert description to bitstring
+def desc_to_bits(desc: dict[tuple[int, tuple[int]], int], kappa: int) -> str:
+    return ''.join(format(desc[s], f'0{5 if s[0] == 1 else 14}b') for s in slot_structure(kappa))
+
+# convert bitstring to description
+def bits_to_desc(bits: str, kappa: int) -> dict[tuple[int, tuple[int]], int]:
+    desc, pos = {}, 0
+    for s in slot_structure(kappa):
+        w = 5 if s[0] == 1 else 14
+        desc[s] = int(bits[pos: pos + w], 2)
+        pos += w
+    assert pos == len(bits), f"leftover bits: consumed {pos} of {len(bits)}"
+    return desc
