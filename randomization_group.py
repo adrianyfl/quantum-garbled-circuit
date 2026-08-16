@@ -1,13 +1,17 @@
+from functools import lru_cache
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import Clifford
-from functools import lru_cache
 from helper import gadget_num_qubits
+from gate_words import (clifford_to_word, word_to_circuit, word_to_bits,
+                        bits_to_word, WORD_BITS, WORD_LEN)
 
 def b_index(i, j, kappa):
     return 2 + kappa + i * (kappa + 1) + j
 
+
 def key(c):
     return c.tableau.tobytes()
+
 
 def generators(n):
     def mk(fn):
@@ -19,16 +23,17 @@ def generators(n):
         gens += [mk(lambda c: c.h(1)), mk(lambda c: c.s(1)), mk(lambda c: c.cx(0, 1))]
     return gens
 
-# build the table that maps n-qubit clifford to a number
+
 @lru_cache(maxsize=None)
 def build(n):
+    """Enumerate the n-qubit Clifford group. TEST FIXTURE ONLY."""
     gens = generators(n)
     ident = Clifford(QuantumCircuit(n))
     index = {key(ident): 0}
     elems = [ident]
     frontier = [ident]
     while frontier:
-        next = []
+        nxt = []
         for c in frontier:
             for g in gens:
                 cand = c.compose(g)
@@ -36,13 +41,14 @@ def build(n):
                 if k not in index:
                     index[k] = len(elems)
                     elems.append(cand)
-                    next.append(cand)
-        frontier = next
+                    nxt.append(cand)
+        frontier = nxt
     return index, elems
 
-# construct the pair + single structure based on kappa
+
 @lru_cache(maxsize=None)
 def slot_structure(kappa):
+    """[(arity, qubit tuple)] -- singles first, then pairs. Deterministic order."""
     pairs = []
     singles = list(range(gadget_num_qubits(kappa)))
     for j in range(kappa + 1):
@@ -50,23 +56,22 @@ def slot_structure(kappa):
             pairs.append((b_index(i, j, kappa), b_index(j, i, kappa)))
             singles.remove(b_index(i, j, kappa))
             singles.remove(b_index(j, i, kappa))
-    slots = []
-    for s in singles:
-        slots.append((1, (s,)))
-    for p in pairs:
-        slots.append((2, p))
-    return slots
+    return [(1, (s,)) for s in singles] + [(2, p) for p in pairs]
 
-# generate a description of a depth one Clifford circuit based on a clifford circuit
-def describe(circuit: QuantumCircuit, kappa: int) -> dict[tuple[int, tuple[int]], int]:
-    # qubit to slot table
+
+@lru_cache(maxsize=None)
+def desc_bits_len(kappa):
+    return sum(WORD_BITS[s[0]] for s in slot_structure(kappa))
+
+
+def describe(circuit: QuantumCircuit, kappa: int) -> dict:
+    """Decompose a depth-one R_kappa circuit into one gate word per slot."""
     slots = slot_structure(kappa)
     slot_of = {}
     for s in slots:
         for q in s[1]:
             slot_of[q] = s
 
-    # gather the gates on qubits
     buckets = {}
     for inst in circuit.data:
         if inst.operation.name in ("barrier", "delay"):
@@ -77,44 +82,51 @@ def describe(circuit: QuantumCircuit, kappa: int) -> dict[tuple[int, tuple[int]]
             raise ValueError(f"{inst.operation.name} on {idxs} spans slots {target_slots}")
         buckets.setdefault(target_slots.pop(), []).append((inst.operation, idxs))
 
-    # convert the gates to numerical values
-    idx1, _ = build(1)
-    idx2, _ = build(2)
     desc = {}
     for s in slots:
         local = QuantumCircuit(s[0])
         for op, idxs in buckets.get(s, []):
             local.append(op, [0 if g == s[1][0] else 1 for g in idxs])
-        desc[s] = idx1[Clifford(local).tableau.tobytes()] if s[0] == 1 else idx2[Clifford(local).tableau.tobytes()]
+        desc[s] = clifford_to_word(Clifford(local), s[0])
     return desc
 
-# generate a description based on lambda2 and A inverse
-def describe_corr(A: QuantumCircuit, lambda2: QuantumCircuit, kappa: int) -> dict[tuple[int, tuple[int]], int]:
-    circuit = QuantumCircuit(A.num_qubits)
-    circuit.compose(A.inverse(), inplace=True)
+
+def describe_corr(a: QuantumCircuit, lambda2: QuantumCircuit, kappa: int) -> dict:
+    """Corr = Lambda2 . A^dagger  ->  A^dagger applied first."""
+    circuit = QuantumCircuit(gadget_num_qubits(kappa))
+    circuit.compose(a.inverse(), inplace=True)
     circuit.compose(lambda2, inplace=True)
     return describe(circuit, kappa)
 
-# rebuild the Clifford circuit based on a description
-def rebuild(desc: dict[tuple[int, tuple[int]], int], kappa: int) -> QuantumCircuit:
-    _, e1 = build(1)
-    _, e2 = build(2)
+
+def rebuild(desc: dict, kappa: int) -> QuantumCircuit:
     circuit = QuantumCircuit(gadget_num_qubits(kappa))
-    for s, idx in desc.items():
-        elems = e1 if s[0] == 1 else e2
-        circuit.compose(elems[idx].to_circuit(), qubits=list(s[1]), inplace=True)
+    for s, word in desc.items():
+        circuit.compose(word_to_circuit(word, s[0]), qubits=list(s[1]), inplace=True)
     return circuit
 
-# convert description to bitstring
-def desc_to_bits(desc: dict[tuple[int, tuple[int]], int], kappa: int) -> str:
-    return ''.join(format(desc[s], f'0{5 if s[0] == 1 else 14}b') for s in slot_structure(kappa))
 
-# convert bitstring to description
-def bits_to_desc(bits: str, kappa: int) -> dict[tuple[int, tuple[int]], int]:
+def desc_to_bits(desc: dict, kappa: int) -> str:
+    return ''.join(word_to_bits(desc[s], s[0]) for s in slot_structure(kappa))
+
+
+def bits_to_desc(bits: str, kappa: int) -> dict:
     desc, pos = {}, 0
     for s in slot_structure(kappa):
-        w = 5 if s[0] == 1 else 14
-        desc[s] = int(bits[pos: pos + w], 2)
+        w = WORD_BITS[s[0]]
+        desc[s] = bits_to_word(bits[pos:pos + w], s[0])
         pos += w
     assert pos == len(bits), f"leftover bits: consumed {pos} of {len(bits)}"
     return desc
+
+
+def slot_bit_offsets(kappa):
+    """[(slot, start, length)] -- where each slot's word sits in the bitstring."""
+    out, pos = [], 0
+    for s in slot_structure(kappa):
+        w = WORD_BITS[s[0]]
+        out.append((s, pos, w))
+        pos += w
+    return out
+
+print(len(build(2)[0]))

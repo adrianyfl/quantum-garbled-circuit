@@ -60,6 +60,8 @@ class QGC:
     teleportation: dict[int, list[TeleportationRecord]] = field(default_factory=dict)
     injection: dict[int, InjectionRecord] = field(default_factory=dict)
     segment_record: dict[int, object] = field(default_factory=dict)
+    cre: dict = field(default_factory=dict)          # gate_id -> GateCRE (CRE mode only)
+    registers: dict = field(default_factory=dict)    # gate_id -> {'cg','desc','anc'} (CRE mode)
 
 @dataclass
 class WireParams:
