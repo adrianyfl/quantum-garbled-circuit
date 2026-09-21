@@ -1,3 +1,4 @@
+import math
 import random
 
 from qiskit import QuantumCircuit, QuantumRegister, AncillaRegister
@@ -7,8 +8,8 @@ from structure import *
 from helper import *
 from encoder import sample_a, construct_lambda1
 from evaluator import construct_lambda2, construct_lambda3
-from randomization_group import slot_bit_offsets, desc_bits_len
-from gate_words import add_controlled_word
+from randomization_group import slot_bit_offsets, phase_bit_offset
+from gate_words import add_controlled_word, PHASE_BITS
 from cre import build_gate_cre, wire_params
 from cdec import add_cdec, cg_layout, prepare_cg
 
@@ -27,6 +28,33 @@ def _mapping(segment_in_epr1, segment2, kappa):
     return mapping
 
 
+def decode_label_bit(circuit, label_qubits, dict_qubits, scratch, bit):
+    """bit ^= the value v encoded by a label register, read only from d^w.
+
+    `label_qubits` holds l_{b,v} and `dict_qubits` holds l_{b,0}; the two are
+    equal exactly when v == 0, so the inequality of the two registers IS v.
+    Nothing here uses the plaintext labels, which is the whole point -- the
+    decoder is not allowed to know them.
+
+    `scratch` is returned to |0>, so it can be shared. The routine is its own
+    inverse: applying it twice restores `bit`.
+    """
+    n = len(label_qubits)
+    for i in range(n):
+        circuit.cx(label_qubits[i], scratch[i])
+        circuit.cx(dict_qubits[i], scratch[i])      # scratch = l_{b,v} XOR l_{b,0}
+    for i in range(n):
+        circuit.x(scratch[i])
+    circuit.mcx(scratch[:n], bit)                   # bit ^= [registers equal] = [v == 0]
+    for i in range(n):
+        circuit.x(scratch[i])
+    for i in range(n):
+        circuit.cx(dict_qubits[i], scratch[i])
+        circuit.cx(label_qubits[i], scratch[i])     # scratch back to |0>
+    circuit.x(bit)                                  # bit ^= [v == 0] ^ 1 = v
+    return circuit
+
+
 def garble_circuit(circuit: QuantumCircuit, kappa: int,
                    input_prep: QuantumCircuit | None = None,
                    mode: str = "direct", prg: str = "xor") -> QGC:
@@ -39,14 +67,18 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
     gate_records: list[GateRecord] = []
     injection_records: dict[int, InjectionRecord] = {}
     teleportation_records: dict[int, list[TeleportationRecord]] = {}
+    # Enc and Dec are built as separate circuits over one shared register set.
     converted_circuit = QuantumCircuit(circuit.num_qubits)
+    decoder_circuit = QuantumCircuit(circuit.num_qubits)
+    both = (converted_circuit, decoder_circuit)
     segment_record: dict[int, object] = {}
     cre_records: dict[int, object] = {}
     registers: dict[int, dict] = {}
+    output_registers: dict[int, dict] = {}
 
     # ---- segments ----
     for q in range(circuit.num_qubits):
-        segment = factory.create(converted_circuit, q)
+        segment = factory.create(both, q)
         segments[segment.segment_id] = segment
         initial_segment[q] = segment.segment_id
         current_segment[q] = segment.segment_id
@@ -57,7 +89,7 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
         input_segment_ids = tuple(current_segment[q] for q in logical_qubits)
         output_segment_ids = []
         for q in logical_qubits:
-            segment = factory.create(converted_circuit, q)
+            segment = factory.create(both, q)
             segments[segment.segment_id] = segment
             output_segment_ids.append(segment.segment_id)
         gate_records.append(GateRecord(gate_id, operation, logical_qubits,
@@ -133,8 +165,8 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
             cg = QuantumRegister(max(n_cg, 1), name=f"cg{g.gate_id}")
             desc = QuantumRegister(gc.garbled.out_bits, name=f"d{g.gate_id}")
             anc = AncillaRegister(1, name=f"anc{g.gate_id}")
-            for r in (cg, desc, anc):
-                converted_circuit.add_register(r)
+            for c in both:
+                c.add_register(cg, desc, anc)
             registers[g.gate_id] = {"cg": cg, "desc": desc, "anc": anc}
             prepare_cg(converted_circuit, gc.garbled, list(cg))
 
@@ -154,13 +186,23 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
                     construct_lambda2(Correction(False, False, False), record.l_z, record.l_x,
                                       record.s_x, record.s_z, record.t_x, record.t_z, kappa),
                     qubits=mapping, inplace=True)
+            # direct mode stays fused: its correction is applied at encode time
+            # and reads z/x in the computational basis, which only holds after
+            # Lambda3. It is a reference oracle, not the paper's scheme.
+            for (segment1, segment2, record, a_circ) in pending:
+                mapping = _mapping(segment1.epr[1], segment2, kappa)
+                converted_circuit.compose(construct_lambda3(kappa), qubits=mapping, inplace=True)
         else:
-            # ---- evaluator side: decode Corr coherently, then apply it ----
+            # ---- Dec, Protocol 7: GateEval(g) ----
+            # Emitted into the decoder circuit. Enc for later gates touches only
+            # e^w_2 and the next wire's ancillas, which are disjoint from what
+            # GateEval touches, so deferring all of Dec past all of Enc is exactly
+            # the paper's ordering (Enc parallel, Dec sequential in topological order).
             label_qubits = []
             for s in input_segments:
                 label_qubits.append(list(s.z))     # labels of d
                 label_qubits.append(list(s.x))     # labels of e
-            add_cdec(converted_circuit, gc.garbled, label_qubits, list(desc),
+            add_cdec(decoder_circuit, gc.garbled, label_qubits, list(desc),
                      anc[0], kappa, cg_qubits=list(cg), mode="register")
 
             for j, (segment1, segment2, record, a_circ) in enumerate(pending):
@@ -169,16 +211,56 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
                 for slot, off, width in slot_bit_offsets(kappa):
                     word_q = [desc[start + off + b] for b in range(width)]
                     targets = [mapping[q] for q in slot[1]]
-                    add_controlled_word(converted_circuit, word_q, targets, slot[0], anc[0])
+                    add_controlled_word(decoder_circuit, word_q, targets, slot[0], anc[0])
+                ph_off = phase_bit_offset(kappa)
+                for i in range(PHASE_BITS):
+                    decoder_circuit.p(math.pi / 4 * (1 << (PHASE_BITS - 1 - i)),
+                                      desc[start + ph_off + i])
+                decoder_circuit.compose(construct_lambda3(kappa), qubits=mapping, inplace=True)
 
-        # ---- Lambda3, both modes ----
-        for (segment1, segment2, record, a_circ) in pending:
-            mapping = _mapping(segment1.epr[1], segment2, kappa)
-            converted_circuit.compose(construct_lambda3(kappa), qubits=mapping, inplace=True)
+    # ---- Enc, Protocol 4 lines 10-12: the label dictionary d^w ----
+    # For every non-traced-out output wire, Enc writes all four labels into d^w
+    # so that Dec can read the output without ever being told them.
+    # Layout: [l_{z,0} | l_{z,1} | l_{x,0} | l_{x,1}], kappa qubits each.
+    for q in range(circuit.num_qubits):
+        segment = segments[current_segment[q]]
+        record = segment_record[segment.segment_id]
+        dict_reg = QuantumRegister(4 * kappa, name=f"dict{segment.segment_id}")
+        scratch = AncillaRegister(kappa, name=f"cmp{segment.segment_id}")
+        bits = AncillaRegister(2, name=f"de{segment.segment_id}")
+        for c in both:
+            c.add_register(dict_reg, scratch, bits)
+        output_registers[segment.segment_id] = {
+            "dict": dict_reg, "scratch": scratch, "bits": bits}
+        for block, label in enumerate((record.l_z[0], record.l_z[1],
+                                       record.l_x[0], record.l_x[1])):
+            for i in range(kappa):
+                if get_bit(label, i):
+                    converted_circuit.x(dict_reg[block * kappa + i])
+
+    # ---- Dec, Protocol 6 lines 5-7: decode the output wires ----
+    for q in range(circuit.num_qubits):
+        segment = segments[current_segment[q]]
+        regs = output_registers[segment.segment_id]
+        dict_reg, scratch, bits = regs["dict"], regs["scratch"], regs["bits"]
+        l_z0 = [dict_reg[i] for i in range(kappa)]
+        l_x0 = [dict_reg[2 * kappa + i] for i in range(kappa)]
+
+        # (z^w, x^w) -> (d, e), reading only the dictionary
+        decode_label_bit(decoder_circuit, list(segment.z), l_z0, scratch, bits[0])
+        decode_label_bit(decoder_circuit, list(segment.x), l_x0, scratch, bits[1])
+        # the wire carries X^e Z^d |psi>, so undo with Z^d X^e
+        decoder_circuit.cx(bits[1], segment.epr[1])
+        decoder_circuit.cz(bits[0], segment.epr[1])
+        # decode_label_bit is self-inverse; repeat it to clear the scratch bits
+        decode_label_bit(decoder_circuit, list(segment.x), l_x0, scratch, bits[1])
+        decode_label_bit(decoder_circuit, list(segment.z), l_z0, scratch, bits[0])
 
     return QGC(
         original_circuit=circuit,
         encoded_circuit=converted_circuit,
+        decoder=decoder_circuit,
+        output_registers=output_registers,
         segments=segments,
         gates=gate_records,
         current_segment=current_segment,

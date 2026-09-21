@@ -78,22 +78,22 @@ def sample_a(kappa: int) -> QuantumCircuit:
     circuit.add_register(x)
 
     # single qubit
-    cliff_circ0 = random_clifford(1).to_circuit()
+    cliff_circ0 = random_clifford(1,0).to_circuit()
     circuit.compose(cliff_circ0, qubits=0 ,inplace=True)
-    cliff_circ3 = random_clifford(1).to_circuit()
+    cliff_circ3 = random_clifford(1,0).to_circuit()
     circuit.compose(cliff_circ3, qubits=1, inplace=True)
     for i in range(0, kappa):
-        cliff_circ1 = random_clifford(1).to_circuit()
+        cliff_circ1 = random_clifford(1,0).to_circuit()
         circuit.compose(cliff_circ1, qubits=[x[i]], inplace=True)
-        cliff_circ2 = random_clifford(1).to_circuit()
+        cliff_circ2 = random_clifford(1,0).to_circuit()
         circuit.compose(cliff_circ2, qubits=[z[i]], inplace=True)
 
     # b registers
     for j in range(kappa + 1):
-        cliff_circ_diag = random_clifford(1).to_circuit()
+        cliff_circ_diag = random_clifford(1,0).to_circuit()
         circuit.compose(cliff_circ_diag, qubits=[b[j][j]], inplace=True)
         for i in range(j):
-            cliff_circ4 = random_clifford(2).to_circuit()
+            cliff_circ4 = random_clifford(2,0).to_circuit()
             circuit.compose(cliff_circ4, qubits=[b[i][j], b[j][i]], inplace=True)
 
     return circuit

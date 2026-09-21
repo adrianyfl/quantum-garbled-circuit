@@ -16,7 +16,8 @@ def build_correction_function(operation: Instruction, params: list[WireParams]):
         for j in range(p):
             w = params[j]
             lambda2 = construct_lambda2(Rs[j], w.l_z, w.l_x, w.s_x, w.s_z, w.t_x, w.t_z, w.kappa)
-            chunks.append(desc_to_bits(describe_corr(w.A, lambda2, w.kappa), w.kappa))
+            d, ph = describe_corr(w.A, lambda2, w.kappa)
+            chunks.append(desc_to_bits(d, w.kappa, ph))
         table[bits] = ''.join(chunks)
     return table
 

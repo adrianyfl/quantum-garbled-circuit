@@ -1,6 +1,7 @@
-import math
+import cmath, math
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import Clifford
+import numpy as np
+from qiskit.quantum_info import Operator
 
 ALPHABET = {
     1: [None, ('h', (0,)), ('s', (0,)), ('sdg', (0,)), ('x', (0,)), ('y', (0,)), ('z', (0,))],
@@ -16,6 +17,22 @@ ALPHABET = {
 WORD_LEN = {1: 4, 2: 19}
 SYM_BITS = {n: math.ceil(math.log2(len(ALPHABET[n]))) for n in (1, 2)}
 WORD_BITS = {n: WORD_LEN[n] * SYM_BITS[n] for n in (1, 2)}
+PHASE_BITS = 3
+PHASE_DEN = 8
+
+"""
+Add global phase to corresponding word
+k with Operator(local) == e^(i*pi*k/4) * Operator(word_to_circuit(word,n))
+"""
+def word_phase(local, word, n) -> int:
+    A = np.asarray(Operator(word_to_circuit(word, n)).data).ravel()
+    B = np.asarray(Operator(local).data).ravel()
+    i = int(np.argmax(np.abs(A)))
+    c = B[i] / A[i]
+    assert np.allclose(A * c, B, atol=1e-7), "slot is not a phase multiple of its word"
+    k = round(cmath.phase(c) / (math.pi / 4)) % PHASE_DEN
+    assert abs(c - cmath.exp(1j * math.pi / 4 * k)) < 1e-7, f"{c} is not an 8th root"
+    return k
 
 
 def clifford_to_word(cliff, n):

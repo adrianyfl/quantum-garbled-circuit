@@ -2,8 +2,7 @@ from functools import lru_cache
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import Clifford
 from helper import gadget_num_qubits
-from gate_words import (clifford_to_word, word_to_circuit, word_to_bits,
-                        bits_to_word, WORD_BITS, WORD_LEN)
+from gate_words import *
 
 def b_index(i, j, kappa):
     return 2 + kappa + i * (kappa + 1) + j
@@ -61,10 +60,12 @@ def slot_structure(kappa):
 
 @lru_cache(maxsize=None)
 def desc_bits_len(kappa):
-    return sum(WORD_BITS[s[0]] for s in slot_structure(kappa))
+    return sum(WORD_BITS[s[0]] for s in slot_structure(kappa)) + PHASE_BITS
 
+def phase_bit_offset(kappa):
+    return desc_bits_len(kappa) - PHASE_BITS
 
-def describe(circuit: QuantumCircuit, kappa: int) -> dict:
+def describe(circuit: QuantumCircuit, kappa: int):
     """Decompose a depth-one R_kappa circuit into one gate word per slot."""
     slots = slot_structure(kappa)
     slot_of = {}
@@ -82,13 +83,15 @@ def describe(circuit: QuantumCircuit, kappa: int) -> dict:
             raise ValueError(f"{inst.operation.name} on {idxs} spans slots {target_slots}")
         buckets.setdefault(target_slots.pop(), []).append((inst.operation, idxs))
 
-    desc = {}
+    desc, total = {}, 0
     for s in slots:
         local = QuantumCircuit(s[0])
         for op, idxs in buckets.get(s, []):
             local.append(op, [0 if g == s[1][0] else 1 for g in idxs])
-        desc[s] = clifford_to_word(Clifford(local), s[0])
-    return desc
+        word = clifford_to_word(Clifford(local), s[0])
+        desc[s] = word
+        total = (total + word_phase(local, word, s[0])) % PHASE_DEN
+    return desc, total
 
 
 def describe_corr(a: QuantumCircuit, lambda2: QuantumCircuit, kappa: int) -> dict:
@@ -106,8 +109,9 @@ def rebuild(desc: dict, kappa: int) -> QuantumCircuit:
     return circuit
 
 
-def desc_to_bits(desc: dict, kappa: int) -> str:
-    return ''.join(word_to_bits(desc[s], s[0]) for s in slot_structure(kappa))
+def desc_to_bits(desc: dict, kappa: int, phase = 0) -> str:
+    body = ''.join(word_to_bits(desc[s], s[0]) for s in slot_structure(kappa))
+    return body + format(phase % PHASE_DEN, f'0{PHASE_BITS}b')
 
 
 def bits_to_desc(bits: str, kappa: int) -> dict:
@@ -128,5 +132,3 @@ def slot_bit_offsets(kappa):
         out.append((s, pos, w))
         pos += w
     return out
-
-print(len(build(2)[0]))
