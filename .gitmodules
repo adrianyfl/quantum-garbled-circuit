@@ -1,0 +1,3 @@
+[submodule "qiskit-simon"]
+	path = qiskit-simon
+	url = https://github.com/adrianyfl/qiskit-simon.git
