@@ -28,6 +28,8 @@ class Level:
     share_round_keys: bool
     tzap: bool
     note: str
+    unary: frozenset = frozenset()
+    and_gadget: bool = False
 
 
 LEVELS = {
@@ -47,6 +49,16 @@ LEVELS = {
     5: Level("tzap", "minimal", 4, True, True,
              "external TZAP pass over the repeated units; needs a measured "
              "factor, which this machine cannot produce (no cargo)"),
+    6: Level("unary-iteration", "minimal", 4, True, False,
+             "one-hot decode per word position instead of a two-MCX test per "
+             "symbol. Applied to 2-qubit slots only: measured 1.35x there, but "
+             "0.71x -- a LOSS -- at arity 1, where 2 symbols cannot amortise "
+             "the decode", unary=frozenset({2})),
+    7: Level("and-gadgets", "minimal", 4, True, False,
+             "SIMON's Toffolis as AND gadgets: 4 T to compute, 0 T to uncompute. "
+             "PROJECTED -- needs mid-circuit measurement and feed-forward, so "
+             "the emitted circuit is unchanged and only the model moves",
+             unary=frozenset({2}), and_gadget=True),
 }
 
 DEFAULT = 2
@@ -64,10 +76,12 @@ def set_level(level: int, tzap_factor: float | None = None):
     spec = LEVELS[level]
 
     gate_words.configure(spec.alphabet)
+    gate_words.UNARY_ARITIES = spec.unary
     randomization_group.desc_bits_len.cache_clear()
 
     cost.T_TOFFOLI = spec.toffoli_t
     cost.SHARE_ROUND_KEYS = spec.share_round_keys
+    cost.AND_GADGET = spec.and_gadget
 
     if spec.tzap:
         if tzap_factor is None:

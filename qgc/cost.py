@@ -29,6 +29,7 @@ T_CH = 4
 
 # Set by qgc.optimization.set_level; see that module for what each means.
 SHARE_ROUND_KEYS = False
+AND_GADGET = False
 TZAP_FACTOR = 1.0
 
 
@@ -231,6 +232,18 @@ def simon_cost(kappa, arities, rounds=None):
         copy_cx += one["cx"]
     circuits = 2 * blocks                     # compute + uncompute
     toffoli = circuits * rounds * n
+    and_ancillas = 0
+    if AND_GADGET:
+        # Gidney's AND gadget: an AND into a fresh ancilla costs 4 T, and its
+        # uncomputation costs 0 T (measure in X, apply a classical CZ). Every
+        # Toffoli here is already half of a compute/uncompute pair, so only the
+        # forward half is charged. Needs one ancilla per Toffoli of a single
+        # encryption, and mid-circuit measurement with feed-forward.
+        # PROJECTED: the emitted circuit is still unitary, see qgc.optimization.
+        simon_t = blocks * rounds * n * 4
+        and_ancillas = rounds * n
+    else:
+        simon_t = toffoli * T_TOFFOLI
     saved_cx = 0
     if SHARE_ROUND_KEYS:
         # Expanding the schedule once per key rather than per block. The
@@ -246,8 +259,9 @@ def simon_cost(kappa, arities, rounds=None):
         "circuits": circuits,
         "toffoli": toffoli,
         "cx": copy_cx,
-        "t": round(toffoli * T_TOFFOLI * TZAP_FACTOR),
+        "t": round(simon_t * TZAP_FACTOR),
         "saved_cx": saved_cx,
+        "and_ancillas": and_ancillas,
         "block_scratch": 2 * n,
     }
 
