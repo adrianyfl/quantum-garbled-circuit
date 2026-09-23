@@ -27,7 +27,8 @@ from qgc.correction import (apply_coherent_correction, get_witnesses,
 from qgc.cre import build_gate_cre, wire_params
 from qgc.gadgets import (construct_classical_teleport, construct_lambda1,
                          construct_lambda2, construct_lambda3, sample_a)
-from qgc.gate_words import PHASE_BITS, add_controlled_word
+from qgc.gate_words import (PHASE_BITS, add_controlled_word,
+                            max_onehot_width)
 from qgc.gateset import assert_gate_set, to_gate_set
 from qgc.helper import get_bit, sample_label
 from qgc.randomization_group import phase_bit_offset, slot_bit_offsets
@@ -237,7 +238,8 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
             n_cg = cg_layout(gc.garbled)
             cg = QuantumRegister(max(n_cg, 1), name=f"cg{g.gate_id}")
             desc = QuantumRegister(gc.garbled.out_bits, name=f"d{g.gate_id}")
-            anc = AncillaRegister(1, name=f"anc{g.gate_id}")
+            # one working ancilla, plus scratch for the unary decoder if enabled
+            anc = AncillaRegister(1 + max_onehot_width(), name=f"anc{g.gate_id}")
             regs = [cg, desc, anc]
             blk = None
             if prg == "simon":
@@ -284,7 +286,7 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
                     word_q = [desc[start + off + b] for b in range(width)]
                     targets = [mapping[q] for q in slot[1]]
                     add_controlled_word(decoder_circuit, word_q, targets, slot[0],
-                                        anc[0])
+                                        anc[0], onehot=list(anc[1:]))
                 # A phase gate on a description qubit is a phase on that branch,
                 # which is exactly the factor the gate words cannot carry.
                 ph_off = phase_bit_offset(kappa)

@@ -107,20 +107,43 @@ exists.
 Both verified against built circuits:
 
 ```
-desc_bits(κ) = 38κ² + 74κ + 39            per output wire
-c^g          = 2^(2p) · p · desc_bits(κ)  per gate of arity p
+desc_bits(κ) = (3+3κ)·12 + κ(κ+1)/2·39 + 3   per output wire
+c^g          = 2^(2p) · p · desc_bits(κ)     per gate of arity p
 ```
+
+The two constants are `WORD_LEN[n] · SYM_BITS[n]`, the bits a gate word costs
+for a single and a paired slot. `run_resources.py` prints the formula for
+whatever alphabet is configured.
 
 Total T-count in Dec (table lookup + coherent SIMON):
 
 | circuit | κ=64 | κ=128 | κ=256 |
 |---|---|---|---|
-| H | 99.2M | 497.3M | 2.96G |
-| CX | 369.0M | 1.88G | 11.40G |
-| H,CX,T | 567.3M | 2.87G | 17.31G |
+| H | 44.3M | 227.7M | 1.41G |
+| CX | 177.1M | 912.8M | 5.64G |
+| H,CX,T | 265.3M | 1.37G | 8.45G |
 
-SIMON dominates the table lookup by ~4.8× at κ=128. The coherent PRG is the
+SIMON dominates the table lookup by ~7.5× at κ=128. The coherent PRG is the
 cost of this scheme.
+
+### The gate word encoding
+
+`WORD_LEN` is exactly the diameter of the Clifford group under `ALPHABET`,
+measured by breadth-first search in `gate_words._word_table`, and words come
+from that table rather than from Qiskit's `Clifford.to_circuit()`. Both choices
+matter, because `add_controlled_word` sweeps *every* non-pad symbol at *every*
+position:
+
+- a word longer than the diameter is pure padding, and a pad position still
+  costs a full sweep;
+- the alphabet size sets both the sweep length and, through `SYM_BITS`, the
+  MCX control count.
+
+So the minimal generating set `{cx, h₀, h₁, s₀, s₁}` beats a convenience
+alphabet with `x`, `y`, `z`, `sdg` even though its words are longer (diameter
+13 against 11). Against the earlier 13-symbol, length-19 encoding this is worth
+**~2.1× total T and ~1.9× qubits**, and it is exactly equivalent — the same
+canonical, fixed-length, topology-only description.
 
 ## How it is verified
 

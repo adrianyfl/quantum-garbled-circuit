@@ -25,6 +25,7 @@ SIMON circuits per block, and it is not optional.
 """
 import os
 import sys
+from functools import lru_cache
 
 # The submodule's modules are flat and top level (params, classical_simon, ...),
 # so it goes on the path rather than into this package.
@@ -54,6 +55,25 @@ def simon_variant(kappa, rounds=None):
 def simon_block_qubits(kappa):
     """Width of the scratch block register add_simon_mask needs."""
     return 2 * USABLE_KAPPA[kappa]
+
+
+@lru_cache(maxsize=None)
+def schedule_cx(kappa, rounds=None):
+    """CNOTs the key schedule costs, measured from the submodule's circuits.
+
+    The difference between the quantum-key and fixed-key builds is exactly the
+    schedule. It is LINEAR, so it contributes no Toffolis: expanding the round
+    keys once per key instead of once per counter block saves CNOTs and nothing
+    else. That is worth knowing before spending effort on it.
+    """
+    params = simon_variant(kappa, rounds)
+    def cx(qc):
+        return sum(1 for i in qc.data if i.operation.name == "cx")
+    quantum = build_simon_encrypt(params.block_size, params.key_size,
+                                  key=None, rounds=params.rounds)
+    fixed = build_simon_encrypt(params.block_size, params.key_size,
+                                key=0, rounds=params.rounds)
+    return cx(quantum) - cx(fixed)
 
 
 def counter_block(tag, ctr, width):

@@ -20,15 +20,21 @@ T-COST MODEL (parameters, not claims -- adjust to your convention):
 import math
 from collections import Counter
 
-from qgc.gate_words import ALPHABET, PHASE_BITS, SYM_BITS, WORD_LEN
+from qgc import gate_words
+from qgc.gate_words import PHASE_BITS
 
 T_TOFFOLI = 7      # 7 T per Toffoli (4 with measurement and feed-forward)
 T_CS = 3
 T_CH = 4
 
-# T cost of CONTROLLED[name], i.e. the controlled form of an alphabet symbol
-_T_CONTROLLED = {"h": T_CH, "s": T_CS, "sdg": T_CS, "cx": T_TOFFOLI,
-                 "x": 0, "y": 0, "z": 0}
+# Set by qgc.optimization.set_level; see that module for what each means.
+SHARE_ROUND_KEYS = False
+TZAP_FACTOR = 1.0
+
+
+def controlled_t(name):
+    """T cost of CONTROLLED[name], read at call time so a level change lands."""
+    return {"h": T_CH, "s": T_CS, "sdg": T_CS, "cx": T_TOFFOLI}.get(name, 0)
 
 
 def mcx_t(controls):
@@ -54,8 +60,8 @@ def desc_bits(kappa):
     enumerate O(kappa^2) slots.
     """
     singles, pairs = slot_counts(kappa)
-    return (singles * (WORD_LEN[1] * SYM_BITS[1])
-            + pairs * (WORD_LEN[2] * SYM_BITS[2]) + PHASE_BITS)
+    return (singles * (gate_words.WORD_LEN[1] * gate_words.SYM_BITS[1])
+            + pairs * (gate_words.WORD_LEN[2] * gate_words.SYM_BITS[2]) + PHASE_BITS)
 
 
 def wire_count(num_qubits, arities):
@@ -80,7 +86,7 @@ def qubit_counts(num_qubits, arities, kappa, mode="cre", traced_out=()):
             out_bits = p * desc_bits(kappa)
             counts["cg"] += max(2 ** (2 * p) * out_bits, 1)
             counts["desc"] += out_bits
-            counts["anc"] += 1
+            counts["anc"] += 1 + gate_words.max_onehot_width()
     counts["total"] = sum(v for k, v in counts.items() if k != "total")
     return counts
 
@@ -92,11 +98,24 @@ def word_cost(n):
     Per word position and per non-pad symbol: flip the symbol's zero bits, mcx
     onto the ancilla, apply the controlled gate, undo both.
     """
-    w, length = SYM_BITS[n], WORD_LEN[n]
-    symbols = range(1, len(ALPHABET[n]))
+    w, length = gate_words.SYM_BITS[n], gate_words.WORD_LEN[n]
+    symbols = range(1, len(gate_words.ALPHABET[n]))
+    gate_t = sum(controlled_t(gate_words.ALPHABET[n][s][0]) for s in symbols)
+
+    if n in gate_words.UNARY_ARITIES:
+        # decode the address into one-hot and undo it: 2(2^w - 1) Toffolis,
+        # then one singly-controlled gate per symbol
+        toffoli = 2 * ((1 << w) - 1)
+        return {
+            "ccx": length * toffoli,
+            "cx": length * toffoli,
+            "x": length * 2,
+            "cgate": length * len(symbols),
+            "t": length * (gate_t + toffoli * T_TOFFOLI),
+        }
+
     zeros = sum(sum(1 for b in range(w) if not ((s >> (w - 1 - b)) & 1))
                 for s in symbols)
-    gate_t = sum(_T_CONTROLLED[ALPHABET[n][s][0]] for s in symbols)
     mcx = 2 * length * len(symbols)
     return {
         "mcx": mcx,
@@ -160,13 +179,16 @@ def output_decode_cost(kappa):
 
 
 def dec_cost(num_qubits, arities, kappa, mode="cre", traced_out=()):
+    """Dec's gate counts. `t` carries the TZAP factor if a level supplied one."""
     total = Counter()
     if mode == "cre":
         for p in arities:
             total.update(gate_eval_cost(p, kappa))
     for _ in range(num_qubits - len(frozenset(traced_out))):
         total.update(output_decode_cost(kappa))
-    return dict(total)
+    out = dict(total)
+    out["t"] = round(out.get("t", 0) * TZAP_FACTOR)
+    return out
 
 
 # ---------------------------------------------------------------- SIMON
@@ -209,6 +231,14 @@ def simon_cost(kappa, arities, rounds=None):
         copy_cx += one["cx"]
     circuits = 2 * blocks                     # compute + uncompute
     toffoli = circuits * rounds * n
+    saved_cx = 0
+    if SHARE_ROUND_KEYS:
+        # Expanding the schedule once per key rather than per block. The
+        # schedule is linear, so this is a CNOT saving only -- toffoli and t
+        # are deliberately untouched.
+        from qgc.simon_prg import schedule_cx
+        keys = 2 * len(arities)
+        saved_cx = max(circuits - keys, 0) * schedule_cx(kappa, rounds)
     return {
         "variant": f"Simon{2 * n}/{kappa}",
         "word_size": n, "key_words": 4, "rounds": rounds,
@@ -216,7 +246,8 @@ def simon_cost(kappa, arities, rounds=None):
         "circuits": circuits,
         "toffoli": toffoli,
         "cx": copy_cx,
-        "t": toffoli * T_TOFFOLI,
+        "t": round(toffoli * T_TOFFOLI * TZAP_FACTOR),
+        "saved_cx": saved_cx,
         "block_scratch": 2 * n,
     }
 

@@ -141,5 +141,11 @@ if __name__ == "__main__":
     dec_table()
     simon_table()
     totals()
-    print("Scaling: desc_bits(kappa) = 38k^2 + 74k + 39 per output wire;")
-    print("         c^g = 2^(2p) * p * desc_bits(kappa) per gate of arity p.")
+    from qgc.gate_words import PHASE_BITS, SYM_BITS, WORD_LEN
+    single = WORD_LEN[1] * SYM_BITS[1]
+    pair = WORD_LEN[2] * SYM_BITS[2]
+    print(f"Scaling, for the current alphabet ({single} bits per single slot, "
+          f"{pair} per pair):")
+    print(f"  desc_bits(k) = (3+3k)*{single} + k(k+1)/2*{pair} + {PHASE_BITS}"
+          f"   per output wire")
+    print("  c^g          = 2^(2p) * p * desc_bits(k)          per gate of arity p")

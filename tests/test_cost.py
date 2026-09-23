@@ -42,10 +42,39 @@ def arities(qc):
 
 
 def test_desc_bits_matches_slot_enumeration():
-    """The closed form must equal what slot_structure actually produces."""
+    """The closed form must equal what slot_structure actually produces.
+
+    The second assertion pins the polynomial for the current alphabet; it is
+    written out from WORD_LEN and SYM_BITS so that changing either updates it
+    rather than leaving a stale constant behind.
+    """
+    from qgc.gate_words import PHASE_BITS, SYM_BITS, WORD_LEN
+    single = WORD_LEN[1] * SYM_BITS[1]
+    pair = WORD_LEN[2] * SYM_BITS[2]
     for kappa in range(1, 9):
         assert cost.desc_bits(kappa) == desc_bits_len(kappa), f"kappa={kappa}"
-        assert cost.desc_bits(kappa) == 38 * kappa ** 2 + 74 * kappa + 39
+        assert cost.desc_bits(kappa) == (
+            (3 + 3 * kappa) * single + kappa * (kappa + 1) // 2 * pair + PHASE_BITS)
+
+
+def test_words_are_shortest_and_exact():
+    """Every word rebuilds its Clifford, and none exceeds WORD_LEN.
+
+    WORD_LEN is the group's diameter, so a word longer than it would mean the
+    table is wrong, and a WORD_LEN larger than the longest word would be pure
+    padding -- each pad position still costs a full symbol sweep in
+    add_controlled_word.
+    """
+    from qiskit.quantum_info import Clifford
+
+    from qgc.gate_words import WORD_LEN, _word_table, word_to_circuit
+    for n in (1, 2):
+        table = _word_table(n)
+        assert len(table) == (24 if n == 1 else 11520), f"n={n}: group incomplete"
+        assert max(len(w) for w in table.values()) == WORD_LEN[n], (
+            f"n={n}: WORD_LEN should be the diameter")
+        for key, word in table.items():
+            assert Clifford(word_to_circuit(word, n)).tableau.tobytes() == key
 
 
 def test_slot_counts():

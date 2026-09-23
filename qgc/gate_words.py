@@ -16,25 +16,76 @@ word and reapplied; see PHASE_BITS and its use in randomization_group.describe.
 """
 import cmath
 import math
+from functools import lru_cache
 
 import numpy as np
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import Operator
+from qiskit.quantum_info import Clifford, Operator
 
-ALPHABET = {
-    1: [None, ('h', (0,)), ('s', (0,)), ('sdg', (0,)), ('x', (0,)), ('y', (0,)), ('z', (0,))],
-    2: [None,
-        ('cx', (0, 1)),
-        ('h', (0,)), ('h', (1,)),
-        ('s', (0,)), ('s', (1,)),
-        ('sdg', (0,)), ('sdg', (1,)),
-        ('x', (0,)), ('x', (1,)),
-        ('y', (0,)), ('y', (1,)),
-        ('z', (0,)), ('z', (1,))],
+# The cost of applying a word is driven by the alphabet twice over:
+# add_controlled_word tests every non-pad symbol at every position, and the
+# symbol register's width sets the MCX control count. So a MINIMAL generating
+# set wins even though its words are longer -- see qgc/optimization.py.
+#
+# WORD_LEN is exactly the diameter of the Clifford group under the alphabet,
+# measured by the breadth-first search in _word_table. Padding beyond it would
+# be pure waste, since a pad position still costs a full symbol sweep.
+ALPHABETS = {
+    "minimal": {
+        "alphabet": {
+            1: [None, ('h', (0,)), ('s', (0,))],
+            2: [None,
+                ('cx', (0, 1)),
+                ('h', (0,)), ('h', (1,)),
+                ('s', (0,)), ('s', (1,))],
+        },
+        "word_len": {1: 6, 2: 13},
+    },
+    # The original convenience alphabet at its diameter. Shorter words than
+    # "minimal" (3 and 11) but many more symbols to sweep.
+    "redundant": {
+        "alphabet": {
+            1: [None, ('h', (0,)), ('s', (0,)), ('sdg', (0,)),
+                ('x', (0,)), ('y', (0,)), ('z', (0,))],
+            2: [None,
+                ('cx', (0, 1)),
+                ('h', (0,)), ('h', (1,)),
+                ('s', (0,)), ('s', (1,)),
+                ('sdg', (0,)), ('sdg', (1,)),
+                ('x', (0,)), ('x', (1,)),
+                ('y', (0,)), ('y', (1,)),
+                ('z', (0,)), ('z', (1,))],
+        },
+        "word_len": {1: 3, 2: 11},
+    },
 }
-WORD_LEN = {1: 4, 2: 19}
-SYM_BITS = {n: math.ceil(math.log2(len(ALPHABET[n]))) for n in (1, 2)}
-WORD_BITS = {n: WORD_LEN[n] * SYM_BITS[n] for n in (1, 2)}
+# The unoptimised baseline: the redundant alphabet padded to the lengths Qiskit's
+# synthesis needed, which are well past the group's diameter.
+ALPHABETS["original"] = {"alphabet": ALPHABETS["redundant"]["alphabet"],
+                         "word_len": {1: 4, 2: 19}}
+
+ALPHABET_NAME = "minimal"
+ALPHABET = {}
+WORD_LEN = {}
+SYM_BITS = {}
+WORD_BITS = {}
+
+
+def configure(name):
+    """Select a gate-word alphabet. Call through qgc.optimization.set_level."""
+    global ALPHABET_NAME, ALPHABET, WORD_LEN, SYM_BITS, WORD_BITS
+    if name not in ALPHABETS:
+        raise ValueError(f"unknown alphabet {name!r}, expected {sorted(ALPHABETS)}")
+    ALPHABET_NAME = name
+    ALPHABET = ALPHABETS[name]["alphabet"]
+    WORD_LEN = ALPHABETS[name]["word_len"]
+    SYM_BITS = {n: math.ceil(math.log2(len(ALPHABET[n]))) for n in (1, 2)}
+    WORD_BITS = {n: WORD_LEN[n] * SYM_BITS[n] for n in (1, 2)}
+    _word_table.cache_clear()
+
+
+def _init():
+    configure(ALPHABET_NAME)
 
 # The slip is always an 8th root of unity: for a 1-qubit slot det(U) = c^2
 # det(W) with Clifford determinants in {+-1, +-i}, and for a 2-qubit slot
@@ -61,12 +112,39 @@ def word_phase(local, word, n) -> int:
     return k
 
 
+@lru_cache(maxsize=None)
+def _word_table(n):
+    """Shortest word over ALPHABET[n] for every element of the Clifford group.
+
+    Built once by breadth-first search: 24 elements for n=1, 11520 for n=2.
+    This replaces Clifford.to_circuit(), which cannot be used with a minimal
+    alphabet (it emits x, y, z and sdg) and which in any case produces words
+    longer than the group's diameter. The lookup is also far cheaper than
+    resynthesising, which matters because describe() calls it once per slot and
+    there are O(kappa^2) slots.
+    """
+    ident = Clifford(QuantumCircuit(n))
+    table = {ident.tableau.tobytes(): []}
+    generators = [(sym, Clifford(word_to_circuit([sym], n)))
+                  for sym in range(1, len(ALPHABET[n]))]
+    frontier = [(ident, [])]
+    while frontier:
+        nxt = []
+        for element, word in frontier:
+            for sym, gen in generators:
+                # Clifford.compose applies self then other, matching the order
+                # word_to_circuit lays symbols out in
+                candidate = element.compose(gen)
+                key = candidate.tableau.tobytes()
+                if key not in table:
+                    table[key] = word + [sym]
+                    nxt.append((candidate, word + [sym]))
+        frontier = nxt
+    return table
+
+
 def clifford_to_word(cliff, n):
-    lookup = {s: i for i, s in enumerate(ALPHABET[n]) if s is not None}
-    word = []
-    for inst in cliff.to_circuit().data:
-        qs = tuple(inst.qubits[i]._index for i in range(len(inst.qubits)))
-        word.append(lookup[(inst.operation.name, qs)])
+    word = _word_table(n)[cliff.tableau.tobytes()]
     assert len(word) <= WORD_LEN[n], f"word too long: {len(word)} > {WORD_LEN[n]}"
     return word + [0] * (WORD_LEN[n] - len(word))
 
@@ -102,19 +180,83 @@ CONTROLLED = {
 }
 
 
-def add_controlled_word(qc, word_qubits, targets, n, ancilla, word_len=None):
+# Arities that use unary iteration, selected by qgc.optimization level 6. The
+# naive sweep tests each symbol with its own pair of MCX; unary iteration
+# decodes the symbol register into a one-hot register once per position and
+# then every gate is singly controlled.
+#
+# It is NOT a win at every arity. Decoding costs 2(2^w - 1) Toffolis for the
+# build and its inverse, against 2*symbols MCX for the sweep, so it pays only
+# when there are enough symbols to amortise the decode. Measured: 1.35x at
+# n=2 (5 symbols, w=3), and 0.71x -- a loss -- at n=1 (2 symbols, w=2).
+UNARY_ARITIES = frozenset()
+
+
+def onehot_width(n):
+    """Scratch the unary decoder needs for an n-qubit slot, 0 if unused."""
+    return (1 << SYM_BITS[n]) if n in UNARY_ARITIES else 0
+
+
+def max_onehot_width():
+    return max((onehot_width(n) for n in (1, 2)), default=0)
+
+
+def _decode_onehot(qc, addr, onehot, uncompute=False):
+    """One-hot over 2^w addresses, 2^w - 1 Toffolis.
+
+    Start with address 0 active, then split every active branch on each address
+    bit in turn. `addr` is little-endian, so onehot[sym] is the qubit that is
+    set exactly when the register holds sym.
+    """
+    w = len(addr)
+    steps = []
+    for b in range(w):
+        for j in range(1 << b):
+            steps.append((j, b, j + (1 << b)))
+    if not uncompute:
+        qc.x(onehot[0])
+        for j, b, hi in steps:
+            qc.ccx(onehot[j], addr[b], onehot[hi])
+            qc.cx(onehot[hi], onehot[j])
+    else:
+        for j, b, hi in reversed(steps):
+            qc.cx(onehot[hi], onehot[j])
+            qc.ccx(onehot[j], addr[b], onehot[hi])
+        qc.x(onehot[0])
+
+
+def add_controlled_word(qc, word_qubits, targets, n, ancilla, word_len=None,
+                        onehot=None):
     """Apply the gate word held in `word_qubits` to `targets`.
 
-    For each position and each non-pad symbol: flip the symbol's zero bits so
-    that "register equals this symbol" becomes "all ones", land that on the
-    ancilla, apply the controlled gate, then undo both. The ancilla arrives and
-    leaves |0>.
+    Naive form: for each position and each non-pad symbol, flip the symbol's
+    zero bits so that "register equals this symbol" becomes "all ones", land
+    that on the ancilla, apply the controlled gate, undo both.
+
+    Unary form (USE_UNARY): decode the position's symbol register into a
+    one-hot register once, then control each gate on its own one-hot qubit.
+    Trades 2*symbols MCX for one 2^w-1 Toffoli decode and its inverse.
+
+    The ancilla and the one-hot scratch both arrive and leave |0>.
     """
     w = SYM_BITS[n]
     length = word_len if word_len is not None else WORD_LEN[n]
     assert len(word_qubits) == length * w
+
     for pos in range(length):
         ctrl = word_qubits[pos * w:(pos + 1) * w]
+
+        if n in UNARY_ARITIES:
+            if onehot is None or len(onehot) < (1 << w):
+                raise ValueError(f"unary form needs {1 << w} one-hot qubits")
+            addr = list(reversed(ctrl))     # the register is MSB first
+            _decode_onehot(qc, addr, onehot)
+            for sym in range(1, len(ALPHABET[n])):
+                name, qs = ALPHABET[n][sym]
+                CONTROLLED[name](qc, onehot[sym], [targets[i] for i in qs])
+            _decode_onehot(qc, addr, onehot, uncompute=True)
+            continue
+
         for sym in range(1, len(ALPHABET[n])):
             name, qs = ALPHABET[n][sym]
             # bit b of the register holds bit (w-1-b) of sym (MSB first)
@@ -127,3 +269,6 @@ def add_controlled_word(qc, word_qubits, targets, n, ancilla, word_len=None):
             for q in flips:
                 qc.x(q)
     return qc
+
+
+_init()

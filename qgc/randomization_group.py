@@ -14,7 +14,8 @@ from functools import lru_cache
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import Clifford
 
-from qgc.gate_words import (PHASE_BITS, PHASE_DEN, WORD_BITS, bits_to_word,
+from qgc import gate_words
+from qgc.gate_words import (PHASE_BITS, PHASE_DEN, bits_to_word,
                             clifford_to_word, word_phase, word_to_bits,
                             word_to_circuit)
 from qgc.helper import gadget_num_qubits
@@ -44,7 +45,7 @@ def desc_bits_len(kappa):
 
     Closed form: 38 kappa^2 + 74 kappa + 39 (see qgc.cost.desc_bits).
     """
-    return sum(WORD_BITS[s[0]] for s in slot_structure(kappa)) + PHASE_BITS
+    return sum(gate_words.WORD_BITS[s[0]] for s in slot_structure(kappa)) + PHASE_BITS
 
 
 def phase_bit_offset(kappa):
@@ -123,7 +124,7 @@ def bits_to_desc(bits: str, kappa: int) -> tuple[dict, int]:
     """Inverse of desc_to_bits. -> (desc, phase)."""
     desc, pos = {}, 0
     for s in slot_structure(kappa):
-        w = WORD_BITS[s[0]]
+        w = gate_words.WORD_BITS[s[0]]
         desc[s] = bits_to_word(bits[pos:pos + w], s[0])
         pos += w
     assert len(bits) == pos + PHASE_BITS, (
@@ -135,7 +136,7 @@ def slot_bit_offsets(kappa):
     """[(slot, start, length)] -- where each slot's word sits in the bitstring."""
     out, pos = [], 0
     for s in slot_structure(kappa):
-        w = WORD_BITS[s[0]]
+        w = gate_words.WORD_BITS[s[0]]
         out.append((s, pos, w))
         pos += w
     return out
