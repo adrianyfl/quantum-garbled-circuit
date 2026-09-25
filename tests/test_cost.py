@@ -150,8 +150,8 @@ def test_simon_mask_cost_exact():
     from qgc.simon_prg import add_simon_mask, simon_block_qubits
 
     kappa, rounds = 64, 4
-    width = simon_block_qubits(kappa)
     for n_in, out_bits in ((1, 8), (2, 40), (2, 70), (4, 16)):
+        width = simon_block_qubits(kappa, out_bits)
         lab = [[i * kappa + b for b in range(kappa)] for i in range(n_in)]
         base = n_in * kappa
         out = list(range(base, base + out_bits))
@@ -164,6 +164,78 @@ def test_simon_mask_cost_exact():
             f"n_in={n_in} out_bits={out_bits}: model {want['toffoli']}, "
             f"built {cost.measured_toffoli(qc)}")
         assert cost.measured_histogram(qc)["cx"] >= want["cx"], "copy-out CX missing"
+
+
+@pytest.fixture
+def at_level():
+    from qgc import optimization
+    yield optimization.set_level
+    optimization.set_level(optimization.DEFAULT)
+
+
+def test_simon_t_per_toffoli_by_level(at_level):
+    """7 T unitary, 5 under tzap, 4 measured, 2 once uncomputation is free."""
+    want = {0: 7, 1: 7, 2: 7, 3: 7, 4: 7, 5: 5, 6: 4, 7: 2}
+    for level, per_toffoli in want.items():
+        at_level(level)
+        for kappa in (64, 128):
+            r = cost.simon_cost(kappa, [1, 2])
+            assert r["t"] == r["toffoli"] * per_toffoli, f"level={level} kappa={kappa}"
+
+
+@pytest.mark.parametrize("level,per_toffoli,emits_ccx", [(5, 5, False), (6, 4, True)])
+def test_simon_mask_t_exact_under_tzap(at_level, level, per_toffoli, emits_ccx):
+    """Level 5 emits tzap's SIMON; level 6 goes back to CCX for the measured form."""
+    pytest.importorskip("tzap")
+    from qgc.simon_prg import add_simon_mask, simon_block_qubits
+
+    at_level(level)
+    kappa, rounds, n_in, out_bits = 64, 4, 2, 40
+    width = simon_block_qubits(kappa, out_bits)
+    lab = [[i * kappa + b for b in range(kappa)] for i in range(n_in)]
+    base = n_in * kappa
+    out = list(range(base, base + out_bits))
+    blk = list(range(base + out_bits, base + out_bits + width))
+    qc = QuantumCircuit(base + out_bits + width)
+    add_simon_mask(qc, lab, out, kappa, n_in, out_bits, blk, rounds=rounds)
+
+    toffoli = cost.simon_mask_cost(kappa, n_in, out_bits, rounds)["toffoli"]
+    assert ("ccx" in qc.count_ops()) == emits_ccx
+    assert cost.measured_t(qc) == toffoli * per_toffoli
+
+
+@pytest.mark.parametrize("batch", [2, 64])
+def test_shared_round_keys_saving_exact(at_level, monkeypatch, batch):
+    """Level 3's CX and X saving, model against two emitted masks.
+
+    rounds=8 so the key schedule has steps to share (it has none below m+1).
+    batch=2 forces a short last batch; 64 puts every block in one.
+    """
+    from qgc.simon_prg import add_simon_mask, schedule_gates, simon_block_qubits
+
+    monkeypatch.setattr(cost, "SHARE_BATCH", batch)
+    kappa, rounds, n_in, out_bits = 64, 8, 2, 70           # 3 blocks per label
+
+    def emit(level):
+        at_level(level)
+        width = simon_block_qubits(kappa, out_bits)
+        lab = [[i * kappa + b for b in range(kappa)] for i in range(n_in)]
+        base = n_in * kappa
+        out = list(range(base, base + out_bits))
+        blk = list(range(base + out_bits, base + out_bits + width))
+        qc = QuantumCircuit(base + out_bits + width)
+        add_simon_mask(qc, lab, out, kappa, n_in, out_bits, blk, rounds=rounds)
+        return cost.measured_histogram(qc), cost.simon_mask_cost(kappa, n_in, out_bits, rounds)
+
+    plain, _ = emit(2)
+    shared, model = emit(3)
+    sched = schedule_gates(kappa, rounds)
+    assert sched["cx"] > 0
+    saved_runs = 2 * (model["blocks"] - model["batches"])
+    assert model["batches"] == n_in * -(-3 // batch)
+    assert plain["ccx"] == shared["ccx"] == model["toffoli"]
+    assert plain["cx"] - shared["cx"] == saved_runs * sched["cx"]
+    assert plain["x"] - shared["x"] == saved_runs * sched["x"]
 
 
 def test_simon_rejects_unusable_kappa():

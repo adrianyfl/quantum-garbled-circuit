@@ -30,7 +30,16 @@ T_CH = 4
 # Set by qgc.optimization.set_level; see that module for what each means.
 SHARE_ROUND_KEYS = False
 AND_GADGET = False
-TZAP_FACTOR = 1.0
+TZAP = False
+
+# tzap phase-folds SIMON's 7-T Toffolis to exactly 5 T each, every variant and
+# key mode -- pinned by qiskit-simon's test_tzap_optimize.
+TZAP_T_PER_TOFFOLI = 5
+
+
+def simon_tzap():
+    """Is SIMON emitted through tzap? Only while it beats the Toffoli in use."""
+    return TZAP and TZAP_T_PER_TOFFOLI < T_TOFFOLI
 
 
 def controlled_t(name):
@@ -180,34 +189,50 @@ def output_decode_cost(kappa):
 
 
 def dec_cost(num_qubits, arities, kappa, mode="cre", traced_out=()):
-    """Dec's gate counts. `t` carries the TZAP factor if a level supplied one."""
+    """Dec's gate counts, with the xor-mask stand-in for the PRG."""
     total = Counter()
     if mode == "cre":
         for p in arities:
             total.update(gate_eval_cost(p, kappa))
     for _ in range(num_qubits - len(frozenset(traced_out))):
         total.update(output_decode_cost(kappa))
-    out = dict(total)
-    out["t"] = round(out.get("t", 0) * TZAP_FACTOR)
-    return out
+    return dict(total)
 
 
 # ---------------------------------------------------------------- SIMON
 SIMON_ROUNDS = {64: 32, 96: 36, 128: 44, 256: 72}   # for n = kappa/4, m = 4
 
+# With shared round keys, counter blocks go through SIMON this many at a time,
+# one key schedule per batch. Each block in a batch holds 2n scratch qubits, so
+# this trades qubits for schedule gates; 64 keeps ~98% of the gate saving.
+SHARE_BATCH = 64
+
+
+def simon_blocks(kappa, out_bits):
+    """Counter blocks one label stream needs for out_bits of mask."""
+    return math.ceil(out_bits / (kappa // 2))
+
+
+def simon_batch(kappa, out_bits):
+    """Counter blocks encrypted together: 1 unless round keys are shared."""
+    return min(SHARE_BATCH, simon_blocks(kappa, out_bits)) if SHARE_ROUND_KEYS else 1
+
 
 def simon_mask_cost(kappa, n_in, out_bits, rounds=None):
     """One add_simon_mask: n_in label streams, out_bits of mask.
 
-    Two SIMON circuits per counter block, because the key register is the label
-    register and has to come back unchanged.
+    Every counter block is encrypted and un-encrypted, because the key register
+    is the label register and has to come back unchanged. The key schedule runs
+    once per batch each way, not once per block.
     """
     n = kappa // 4
     rounds = SIMON_ROUNDS[kappa] if rounds is None else rounds
-    blocks = n_in * math.ceil(out_bits / (2 * n))
+    per_label = simon_blocks(kappa, out_bits)
+    blocks = n_in * per_label
     circuits = 2 * blocks
     return {
         "blocks": blocks,
+        "batches": n_in * math.ceil(per_label / simon_batch(kappa, out_bits)),
         "circuits": circuits,
         "toffoli": circuits * rounds * n,
         "cx": n_in * out_bits,
@@ -225,11 +250,14 @@ def simon_cost(kappa, arities, rounds=None):
                          f"SIMON at n=kappa/4, m=4; got {kappa}")
     n = kappa // 4
     rounds = SIMON_ROUNDS[kappa] if rounds is None else rounds
-    blocks = copy_cx = 0
+    blocks = batches = copy_cx = scratch = 0
     for p in arities:
-        one = simon_mask_cost(kappa, 2 * p, p * desc_bits(kappa), rounds)
+        out_bits = p * desc_bits(kappa)
+        one = simon_mask_cost(kappa, 2 * p, out_bits, rounds)
         blocks += one["blocks"]
+        batches += one["batches"]
         copy_cx += one["cx"]
+        scratch += 2 * n * simon_batch(kappa, out_bits)
     circuits = 2 * blocks                     # compute + uncompute
     toffoli = circuits * rounds * n
     and_ancillas = 0
@@ -243,26 +271,27 @@ def simon_cost(kappa, arities, rounds=None):
         simon_t = blocks * rounds * n * 4
         and_ancillas = rounds * n
     else:
-        simon_t = toffoli * T_TOFFOLI
-    saved_cx = 0
+        simon_t = toffoli * (TZAP_T_PER_TOFFOLI if simon_tzap() else T_TOFFOLI)
+    saved = {"cx": 0, "x": 0}
     if SHARE_ROUND_KEYS:
-        # Expanding the schedule once per key rather than per block. The
-        # schedule is linear, so this is a CNOT saving only -- toffoli and t
-        # are deliberately untouched.
-        from qgc.simon_prg import schedule_cx
-        keys = 2 * len(arities)
-        saved_cx = max(circuits - keys, 0) * schedule_cx(kappa, rounds)
+        # The schedule runs twice per batch (compute, uncompute) instead of
+        # twice per block. It is linear, so toffoli and t are untouched.
+        from qgc.simon_prg import schedule_gates
+        saved = {g: 2 * (blocks - batches) * v
+                 for g, v in schedule_gates(kappa, rounds).items()}
     return {
         "variant": f"Simon{2 * n}/{kappa}",
         "word_size": n, "key_words": 4, "rounds": rounds,
         "blocks": blocks,
+        "batches": batches,
         "circuits": circuits,
         "toffoli": toffoli,
         "cx": copy_cx,
-        "t": round(simon_t * TZAP_FACTOR),
-        "saved_cx": saved_cx,
+        "t": simon_t,
+        "saved_cx": saved["cx"],
+        "saved_x": saved["x"],
         "and_ancillas": and_ancillas,
-        "block_scratch": 2 * n,
+        "block_scratch": scratch,      # summed over gates, one register each
     }
 
 

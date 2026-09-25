@@ -244,7 +244,8 @@ def garble_circuit(circuit: QuantumCircuit, kappa: int,
             blk = None
             if prg == "simon":
                 from qgc.simon_prg import simon_block_qubits
-                blk = AncillaRegister(simon_block_qubits(kappa), name=f"blk{g.gate_id}")
+                blk = AncillaRegister(simon_block_qubits(kappa, gc.garbled.out_bits),
+                                      name=f"blk{g.gate_id}")
                 regs.append(blk)
             for c in both:
                 c.add_register(*regs)

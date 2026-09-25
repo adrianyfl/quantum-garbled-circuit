@@ -68,8 +68,8 @@ def test_variant_selection():
 def test_simon_mask_matches_classical():
     """add_simon_mask must reproduce prg_simon bit for bit."""
     random.seed(0)
-    width = simon_block_qubits(KAPPA)
     for n_in, out_bits in ((1, 8), (2, 40), (2, 70), (4, 16)):
+        width = simon_block_qubits(KAPPA, out_bits)
         labels = [random.getrandbits(KAPPA) for _ in range(n_in)]
         want = prg_simon(labels, KAPPA, 0, out_bits, rounds=ROUNDS)
 
@@ -96,6 +96,45 @@ def test_simon_mask_matches_classical():
         assert all(end[q] == 0 for q in blk), "block scratch left dirty"
 
 
+def test_shared_key_mask_matches_classical(monkeypatch):
+    """Level 3 batches counter blocks under one key schedule; bits must not move.
+
+    rounds=8 gives the schedule steps to share, and a batch of 2 over 3 blocks
+    forces a short last batch.
+    """
+    from qgc import cost, optimization
+    monkeypatch.setattr(cost, "SHARE_BATCH", 2)
+    optimization.set_level(3)
+    try:
+        random.seed(3)
+        for n_in, out_bits in ((1, 8), (2, 70), (4, 40)):
+            width = simon_block_qubits(KAPPA, out_bits)
+            assert width == 32 * min(2, -(-out_bits // 32))
+            labels = [random.getrandbits(KAPPA) for _ in range(n_in)]
+            want = prg_simon(labels, KAPPA, 0, out_bits, rounds=8)
+
+            lab = [[i * KAPPA + b for b in range(KAPPA)] for i in range(n_in)]
+            base = n_in * KAPPA
+            out = list(range(base, base + out_bits))
+            blk = list(range(base + out_bits, base + out_bits + width))
+            qc = QuantumCircuit(base + out_bits + width)
+            add_simon_mask(qc, lab, out, KAPPA, n_in, out_bits, blk, rounds=8)
+
+            start = [0] * qc.num_qubits
+            for i in range(n_in):
+                for b in range(KAPPA):
+                    start[lab[i][b]] = get_bit(labels[i], b)
+            end = basis_eval(qc, start)
+
+            assert [end[out[j]] for j in range(out_bits)] == want, f"n_in={n_in}"
+            for i in range(n_in):
+                for b in range(KAPPA):
+                    assert end[lab[i][b]] == get_bit(labels[i], b), "label not restored"
+            assert all(end[q] == 0 for q in blk), "block scratch left dirty"
+    finally:
+        optimization.set_level(optimization.DEFAULT)
+
+
 @pytest.mark.parametrize("n_in,out_bits", [(2, 6), (2, 40), (4, 5)])
 def test_add_cdec_with_simon(n_in, out_bits):
     """The whole decoder, with real SIMON, against the classical decoder."""
@@ -105,7 +144,7 @@ def test_add_cdec_with_simon(n_in, out_bits):
     labels = [sample_label(KAPPA) for _ in range(n_in)]
     g = prg_garble(table, labels, KAPPA, prg="simon", rounds=ROUNDS)
 
-    width = simon_block_qubits(KAPPA)
+    width = simon_block_qubits(KAPPA, out_bits)
     n_cg = cg_layout(g)
     lab = [[i * KAPPA + b for b in range(KAPPA)] for i in range(n_in)]
     base = n_in * KAPPA
@@ -140,6 +179,49 @@ def test_add_cdec_with_simon(n_in, out_bits):
             for b in range(KAPPA):
                 assert end[lab[i][b]] == get_bit(held[i], b), "label not restored"
         assert [end[q] for q in cg] == cg_bits(g), "c^g disturbed"
+
+
+def test_tzap_simon_mask_matches_classical():
+    """Level 5's tzap-optimised mask must still be prg_simon, bit for bit.
+
+    The optimised circuit has H and T, so basis_eval cannot run it; Aer's MPS
+    method does, and a permutation circuit must land on one outcome.
+    """
+    pytest.importorskip("tzap")
+    pytest.importorskip("qiskit_aer")
+    from tzap_optimize import simulate_basis
+
+    from qgc import optimization
+    optimization.set_level(5)
+    try:
+        random.seed(5)
+        rounds = 8                   # so the shared key schedule has steps
+        for n_in, out_bits in ((1, 8), (2, 40)):
+            width = simon_block_qubits(KAPPA, out_bits)
+            labels = [random.getrandbits(KAPPA) for _ in range(n_in)]
+            want = prg_simon(labels, KAPPA, 0, out_bits, rounds=rounds)
+
+            lab = [[i * KAPPA + b for b in range(KAPPA)] for i in range(n_in)]
+            base = n_in * KAPPA
+            out = list(range(base, base + out_bits))
+            blk = list(range(base + out_bits, base + out_bits + width))
+            qc = QuantumCircuit(base + out_bits + width)
+            add_simon_mask(qc, lab, out, KAPPA, n_in, out_bits, blk, rounds=rounds)
+            assert "ccx" not in qc.count_ops(), "level 5 should emit tzap's SIMON"
+
+            start = [0] * qc.num_qubits
+            for i in range(n_in):
+                for b in range(KAPPA):
+                    start[lab[i][b]] = get_bit(labels[i], b)
+            end = simulate_basis(qc, start)
+
+            assert [end[out[j]] for j in range(out_bits)] == want, f"n_in={n_in}"
+            for i in range(n_in):
+                for b in range(KAPPA):
+                    assert end[lab[i][b]] == get_bit(labels[i], b), "label not restored"
+            assert all(end[q] == 0 for q in blk), "block scratch left dirty"
+    finally:
+        optimization.set_level(optimization.DEFAULT)
 
 
 def test_simon_and_xor_garble_the_same_table():
